@@ -380,6 +380,83 @@ func TestCollectionExpire(t *testing.T) {
 			},
 		},
 		{
+			name: "summary quantile updates and expires based on most recent AddTime",
+			now:  time.Unix(20, 0),
+			age:  10 * time.Second,
+			input: []Input{
+				{
+					metric: testutil.MustMetric(
+						"prometheus",
+						map[string]string{},
+						map[string]interface{}{
+							"rpc_duration_seconds_sum":   1.0,
+							"rpc_duration_seconds_count": 1,
+						},
+						time.Unix(0, 0),
+						telegraf.Summary,
+					),
+					addtime: time.Unix(0, 0),
+				}, {
+					metric: testutil.MustMetric(
+						"prometheus",
+						map[string]string{"quantile": "0.01"},
+						map[string]interface{}{
+							"rpc_duration_seconds": 1.0,
+						},
+						time.Unix(0, 0),
+						telegraf.Summary,
+					),
+					addtime: time.Unix(0, 0),
+				}, {
+					// Updated Summary
+					metric: testutil.MustMetric(
+						"prometheus",
+						map[string]string{},
+						map[string]interface{}{
+							"rpc_duration_seconds_sum":   2.0,
+							"rpc_duration_seconds_count": 2,
+						},
+						time.Unix(0, 0),
+						telegraf.Summary,
+					),
+					addtime: time.Unix(15, 0), // Updated AddTime to not be expired
+				}, {
+					metric: testutil.MustMetric(
+						"prometheus",
+						map[string]string{"quantile": "0.01"},
+						map[string]interface{}{
+							"rpc_duration_seconds": 2.0,
+						},
+						time.Unix(0, 0),
+						telegraf.Summary,
+					),
+					addtime: time.Unix(15, 0),  // Updated AddTime to not be expired
+				},
+			},
+			expected: []*dto.MetricFamily{
+				{
+					Name: proto.String("rpc_duration_seconds"),
+					Help: proto.String(helpString),
+					Type: dto.MetricType_SUMMARY.Enum(),
+					Metric: []*dto.Metric{
+						{
+							Label: []*dto.LabelPair{},
+							Summary: &dto.Summary{
+								SampleCount: proto.Uint64(2),
+								SampleSum:   proto.Float64(2.0),
+								Quantile: []*dto.Quantile{
+									{
+										Quantile: proto.Float64(0.01),
+										Value:    proto.Float64(2),
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+		{
 			name: "expire based on add time",
 			now:  time.Unix(20, 0),
 			age:  10 * time.Second,
