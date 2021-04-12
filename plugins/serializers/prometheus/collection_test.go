@@ -302,6 +302,109 @@ func TestCollectionExpire(t *testing.T) {
 				},
 			},
 		},
+{
+			name: "histogram expires based on most recent AddTimeb",
+			now:  time.Unix(20, 0),
+			age:  10 * time.Second,
+			input: []Input{
+				{
+					metric: testutil.MustMetric(
+						"prometheus",
+						map[string]string{},
+						map[string]interface{}{
+							"http_request_duration_seconds_sum":   10.0,
+							"http_request_duration_seconds_count": 2,
+						},
+						time.Unix(0, 0),
+						telegraf.Histogram,
+					),
+					addtime: time.Unix(0, 0),
+				}, {
+					metric: testutil.MustMetric(
+						"prometheus",
+						map[string]string{"le": "0.05"},
+						map[string]interface{}{
+							"http_request_duration_seconds_bucket": 1.0,
+						},
+						time.Unix(0, 0),
+						telegraf.Histogram,
+					),
+					addtime: time.Unix(0, 0),
+				}, {
+					metric: testutil.MustMetric(
+						"prometheus",
+						map[string]string{"le": "+Inf"},
+						map[string]interface{}{
+							"http_request_duration_seconds_bucket": 1.0,
+						},
+						time.Unix(0, 0),
+						telegraf.Histogram,
+					),
+					addtime: time.Unix(0, 0),
+				}, {
+					// Next interval
+					metric: testutil.MustMetric(
+						"prometheus",
+						map[string]string{},
+						map[string]interface{}{
+							"http_request_duration_seconds_sum":   20.0,
+							"http_request_duration_seconds_count": 4,
+						},
+						time.Unix(0, 0),
+						telegraf.Histogram,
+					),
+					addtime: time.Unix(15, 0), // Update addTime to not be expired
+				}, {
+					metric: testutil.MustMetric(
+						"prometheus",
+						map[string]string{"le": "0.05"},
+						map[string]interface{}{
+							"http_request_duration_seconds_bucket": 2.0,
+						},
+						time.Unix(0, 0),
+						telegraf.Histogram,
+					),
+					addtime: time.Unix(15, 0), // Update addTime to not be expired
+				}, {
+					metric: testutil.MustMetric(
+						"prometheus",
+						map[string]string{"le": "+Inf"},
+						map[string]interface{}{
+							"http_request_duration_seconds_bucket": 2.0,
+						},
+						time.Unix(0, 0),
+						telegraf.Histogram,
+					),
+					addtime: time.Unix(15, 0), // Update addTime to not be expired
+				},
+			},
+			expected: []*dto.MetricFamily{
+				{
+					Name: proto.String("http_request_duration_seconds"),
+					Help: proto.String(helpString),
+					Type: dto.MetricType_HISTOGRAM.Enum(),
+					Metric: []*dto.Metric{
+						{
+							Label: []*dto.LabelPair{},
+							Histogram: &dto.Histogram{
+								SampleCount: proto.Uint64(4),
+								SampleSum:   proto.Float64(20.0),
+								Bucket: []*dto.Bucket{
+									{
+										UpperBound:      proto.Float64(0.05),
+										CumulativeCount: proto.Uint64(2),
+									},
+									{
+										UpperBound:      proto.Float64(math.Inf(1)),
+										CumulativeCount: proto.Uint64(2),
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+		},
 		{
 			name: "summary quantile updates",
 			now:  time.Unix(0, 0),
