@@ -39,46 +39,98 @@ type Scaler struct {
 	Value float64
 }
 
+type Sum struct {
+	Value float64
+	AddTime time.Time
+}
+
+type Count struct {
+	Value uint64
+	AddTime time.Time
+}
+
 type Bucket struct {
 	Bound float64
 	Count uint64
+	AddTime time.Time
 }
 
 type Quantile struct {
 	Quantile float64
 	Value    float64
+	AddTime time.Time
 }
 
 type Histogram struct {
 	Buckets []Bucket
-	Count   uint64
-	Sum     float64
+	Count   *Count
+	Sum     *Sum
 }
 
 func (h *Histogram) merge(b Bucket) {
 	for i := range h.Buckets {
 		if h.Buckets[i].Bound == b.Bound {
 			h.Buckets[i].Count = b.Count
+			h.Buckets[i].AddTime = b.AddTime
 			return
 		}
 	}
 	h.Buckets = append(h.Buckets, b)
 }
 
+func (h *Histogram) expire(time time.Time) {
+	n := 0
+	for _, bucket := range h.Buckets {
+		if !bucket.AddTime.Before(time) {
+			h.Buckets[n] = bucket
+			n++
+		} 
+	}
+	h.Buckets = h.Buckets[:n]
+
+	if (h.Sum != nil && h.Sum.AddTime.Before(time)) {
+		h.Sum = nil
+	}
+
+	if (h.Count != nil && h.Count.AddTime.Before(time)) {
+		h.Count = nil
+	}
+}
+
 type Summary struct {
 	Quantiles []Quantile
-	Count     uint64
-	Sum       float64
+	Count     *Count
+	Sum       *Sum
 }
 
 func (s *Summary) merge(q Quantile) {
 	for i := range s.Quantiles {
 		if s.Quantiles[i].Quantile == q.Quantile {
 			s.Quantiles[i].Value = q.Value
+			s.Quantiles[i].AddTime = q.AddTime
 			return
 		}
 	}
 	s.Quantiles = append(s.Quantiles, q)
+}
+
+func (s *Summary) expire(time time.Time) {
+	n := 0
+	for _, quantile := range s.Quantiles {
+		if !quantile.AddTime.Before(time) {
+			s.Quantiles[n] = quantile
+			n++
+		} 
+	}
+	s.Quantiles = s.Quantiles[:n]
+
+	if (s.Sum != nil && s.Sum.AddTime.Before(time)) {
+		s.Sum = nil
+	}
+
+	if (s.Count != nil && s.Count.AddTime.Before(time)) {
+		s.Count = nil
+	}
 }
 
 type MetricKey uint64
@@ -245,7 +297,7 @@ func (c *Collection) Add(metric telegraf.Metric, now time.Time) {
 				}
 			} else {
 				m.Time = metric.Time()
-				m.AddTime = now
+				m.AddTime = now // probably remove?
 			}
 			switch {
 			case strings.HasSuffix(field.Key, "_bucket"):
@@ -266,6 +318,7 @@ func (c *Collection) Add(metric telegraf.Metric, now time.Time) {
 				m.Histogram.merge(Bucket{
 					Bound: bound,
 					Count: count,
+					AddTime: now,
 				})
 			case strings.HasSuffix(field.Key, "_sum"):
 				sum, ok := SampleSum(field.Value)
@@ -273,14 +326,14 @@ func (c *Collection) Add(metric telegraf.Metric, now time.Time) {
 					continue
 				}
 
-				m.Histogram.Sum = sum
+				m.Histogram.Sum = &Sum{sum, now}
 			case strings.HasSuffix(field.Key, "_count"):
 				count, ok := SampleCount(field.Value)
 				if !ok {
 					continue
 				}
 
-				m.Histogram.Count = count
+				m.Histogram.Count = &Count{count, now}
 			default:
 				continue
 			}
@@ -305,14 +358,14 @@ func (c *Collection) Add(metric telegraf.Metric, now time.Time) {
 					continue
 				}
 
-				m.Summary.Sum = sum
+				m.Summary.Sum = &Sum{sum, now}
 			case strings.HasSuffix(field.Key, "_count"):
 				count, ok := SampleCount(field.Value)
 				if !ok {
 					continue
 				}
 
-				m.Summary.Count = count
+				m.Summary.Count = &Count{count, now}
 			default:
 				quantileTag, ok := metric.GetTag("quantile")
 				if !ok {
@@ -331,6 +384,7 @@ func (c *Collection) Add(metric telegraf.Metric, now time.Time) {
 				m.Summary.merge(Quantile{
 					Quantile: quantile,
 					Value:    value,
+					AddTime:  now,
 				})
 			}
 
@@ -343,11 +397,36 @@ func (c *Collection) Expire(now time.Time, age time.Duration) {
 	expireTime := now.Add(-age)
 	for _, entry := range c.Entries {
 		for key, metric := range entry.Metrics {
-			if metric.AddTime.Before(expireTime) {
-				delete(entry.Metrics, key)
-				if len(entry.Metrics) == 0 {
-					delete(c.Entries, entry.Family)
+			switch entry.Family.Type {
+			case telegraf.Counter:
+				fallthrough
+			case telegraf.Gauge:
+				fallthrough
+			case telegraf.Untyped:
+				if metric.AddTime.Before(expireTime) {
+					delete(entry.Metrics, key)
+					if len(entry.Metrics) == 0 {
+						delete(c.Entries, entry.Family)
+					}
 				}
+			case telegraf.Histogram:
+				if metric.AddTime.Before(expireTime) {
+					delete(entry.Metrics, key)
+					if len(entry.Metrics) == 0 {
+						delete(c.Entries, entry.Family)
+					}
+					continue
+				}
+				metric.Histogram.expire(expireTime)
+			case telegraf.Summary:
+				if metric.AddTime.Before(expireTime) {
+					delete(entry.Metrics, key)
+					if len(entry.Metrics) == 0 {
+						delete(c.Entries, entry.Family)
+					}
+					continue
+				}
+				metric.Summary.expire(expireTime)
 			}
 		}
 	}
@@ -452,11 +531,19 @@ func (c *Collection) GetProto() []*dto.MetricFamily {
 					})
 				}
 
+
 				m.Histogram = &dto.Histogram{
 					Bucket:      buckets,
-					SampleCount: proto.Uint64(metric.Histogram.Count),
-					SampleSum:   proto.Float64(metric.Histogram.Sum),
 				}
+
+				if (metric.Histogram.Sum != nil) {
+					m.Histogram.SampleSum = proto.Float64(metric.Histogram.Sum.Value)
+				}
+
+				if (metric.Histogram.Count != nil) {
+					m.Histogram.SampleCount = proto.Uint64(metric.Histogram.Count.Value)
+				}
+
 			case telegraf.Summary:
 				quantiles := make([]*dto.Quantile, 0, len(metric.Summary.Quantiles))
 				for _, quantile := range metric.Summary.Quantiles {
@@ -468,8 +555,14 @@ func (c *Collection) GetProto() []*dto.MetricFamily {
 
 				m.Summary = &dto.Summary{
 					Quantile:    quantiles,
-					SampleCount: proto.Uint64(metric.Summary.Count),
-					SampleSum:   proto.Float64(metric.Summary.Sum),
+				}
+
+				if (metric.Summary.Sum != nil) {
+					m.Summary.SampleSum = proto.Float64(metric.Summary.Sum.Value)
+				}
+
+				if (metric.Summary.Count != nil) {
+					m.Summary.SampleCount = proto.Uint64(metric.Summary.Count.Value)
 				}
 			default:
 				panic("unknown telegraf.ValueType")

@@ -302,8 +302,8 @@ func TestCollectionExpire(t *testing.T) {
 				},
 			},
 		},
-{
-			name: "histogram expires based on most recent AddTimeb",
+		{
+			name: "entire histogram expires",
 			now:  time.Unix(20, 0),
 			age:  10 * time.Second,
 			input: []Input{
@@ -341,41 +341,49 @@ func TestCollectionExpire(t *testing.T) {
 						telegraf.Histogram,
 					),
 					addtime: time.Unix(0, 0),
-				}, {
-					// Next interval
+				},
+			},
+			expected: []*dto.MetricFamily{},
+		},
+		{
+			name: "histogram expires individual buckets based on their AddTime",
+			now:  time.Unix(20, 0),
+			age:  10 * time.Second,
+			input: []Input{
+				{
 					metric: testutil.MustMetric(
 						"prometheus",
-						map[string]string{},
+						map[string]string{"le": "+Inf"},
 						map[string]interface{}{
-							"http_request_duration_seconds_sum":   20.0,
-							"http_request_duration_seconds_count": 4,
+							"http_request_duration_seconds_bucket": 1.0,
 						},
 						time.Unix(0, 0),
 						telegraf.Histogram,
 					),
-					addtime: time.Unix(15, 0), // Update addTime to not be expired
+					addtime: time.Unix(0, 0), // Old addTime, will be expired
+				}, {
+					metric: testutil.MustMetric(
+						"prometheus",
+						map[string]string{},
+						map[string]interface{}{
+							"http_request_duration_seconds_sum":   10.0,
+							"http_request_duration_seconds_count": 2,
+						},
+						time.Unix(0, 0),
+						telegraf.Histogram,
+					),
+					addtime: time.Unix(15, 0),
 				}, {
 					metric: testutil.MustMetric(
 						"prometheus",
 						map[string]string{"le": "0.05"},
 						map[string]interface{}{
-							"http_request_duration_seconds_bucket": 2.0,
+							"http_request_duration_seconds_bucket": 1.0,
 						},
 						time.Unix(0, 0),
 						telegraf.Histogram,
 					),
-					addtime: time.Unix(15, 0), // Update addTime to not be expired
-				}, {
-					metric: testutil.MustMetric(
-						"prometheus",
-						map[string]string{"le": "+Inf"},
-						map[string]interface{}{
-							"http_request_duration_seconds_bucket": 2.0,
-						},
-						time.Unix(0, 0),
-						telegraf.Histogram,
-					),
-					addtime: time.Unix(15, 0), // Update addTime to not be expired
+					addtime: time.Unix(15, 0),
 				},
 			},
 			expected: []*dto.MetricFamily{
@@ -387,16 +395,51 @@ func TestCollectionExpire(t *testing.T) {
 						{
 							Label: []*dto.LabelPair{},
 							Histogram: &dto.Histogram{
-								SampleCount: proto.Uint64(4),
-								SampleSum:   proto.Float64(20.0),
+								SampleCount: proto.Uint64(2),
+								SampleSum:   proto.Float64(10.0),
 								Bucket: []*dto.Bucket{
 									{
 										UpperBound:      proto.Float64(0.05),
-										CumulativeCount: proto.Uint64(2),
+										CumulativeCount: proto.Uint64(1),
 									},
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+		{
+			name: "histogram works without ever receiving a _sum or _count metric",
+			now:  time.Unix(20, 0),
+			age:  10 * time.Second,
+			input: []Input{
+				{
+					metric: testutil.MustMetric(
+						"prometheus",
+						map[string]string{"le": "0.05"},
+						map[string]interface{}{
+							"http_request_duration_seconds_bucket": 1.0,
+						},
+						time.Unix(0, 0),
+						telegraf.Histogram,
+					),
+					addtime: time.Unix(15, 0),
+				},
+			},
+			expected: []*dto.MetricFamily{
+				{
+					Name: proto.String("http_request_duration_seconds"),
+					Help: proto.String(helpString),
+					Type: dto.MetricType_HISTOGRAM.Enum(),
+					Metric: []*dto.Metric{
+						{
+							Label: []*dto.LabelPair{},
+							Histogram: &dto.Histogram{
+								Bucket: []*dto.Bucket{
 									{
-										UpperBound:      proto.Float64(math.Inf(1)),
-										CumulativeCount: proto.Uint64(2),
+										UpperBound:      proto.Float64(0.05),
+										CumulativeCount: proto.Uint64(1),
 									},
 								},
 							},
@@ -483,7 +526,7 @@ func TestCollectionExpire(t *testing.T) {
 			},
 		},
 		{
-			name: "summary quantile updates and expires based on most recent AddTime",
+			name: "Entire summary expires",
 			now:  time.Unix(20, 0),
 			age:  10 * time.Second,
 			input: []Input{
@@ -510,30 +553,60 @@ func TestCollectionExpire(t *testing.T) {
 						telegraf.Summary,
 					),
 					addtime: time.Unix(0, 0),
-				}, {
-					// Updated Summary
+				},
+			},
+			expected: []*dto.MetricFamily{},
+		},
+		{
+			name: "summary quantile updates and expires individual components based on AddTime",
+			now:  time.Unix(20, 0),
+			age:  10 * time.Second,
+			input: []Input{
+				{
 					metric: testutil.MustMetric(
 						"prometheus",
 						map[string]string{},
 						map[string]interface{}{
-							"rpc_duration_seconds_sum":   2.0,
-							"rpc_duration_seconds_count": 2,
+							"rpc_duration_seconds_sum":   1.0,
+							"rpc_duration_seconds_count": 1,
 						},
 						time.Unix(0, 0),
 						telegraf.Summary,
 					),
-					addtime: time.Unix(15, 0), // Updated AddTime to not be expired
+					addtime: time.Unix(0, 0), // Will expire
 				}, {
 					metric: testutil.MustMetric(
 						"prometheus",
 						map[string]string{"quantile": "0.01"},
 						map[string]interface{}{
-							"rpc_duration_seconds": 2.0,
+							"rpc_duration_seconds": 1.0,
 						},
 						time.Unix(0, 0),
 						telegraf.Summary,
 					),
-					addtime: time.Unix(15, 0),  // Updated AddTime to not be expired
+					addtime: time.Unix(0, 0),
+				},  {
+					metric: testutil.MustMetric(
+						"prometheus",
+						map[string]string{"quantile": "0.5"},
+						map[string]interface{}{
+							"rpc_duration_seconds": 10.0,
+						},
+						time.Unix(0, 0),
+						telegraf.Summary,
+					),
+					addtime: time.Unix(0, 0), // Will expire
+				}, {
+					metric: testutil.MustMetric(
+						"prometheus",
+						map[string]string{"quantile": "0.01"},
+						map[string]interface{}{
+							"rpc_duration_seconds": 1.0,
+						},
+						time.Unix(0, 0),
+						telegraf.Summary,
+					),
+					addtime: time.Unix(15, 0), // Will keep
 				},
 			},
 			expected: []*dto.MetricFamily{
@@ -545,12 +618,60 @@ func TestCollectionExpire(t *testing.T) {
 						{
 							Label: []*dto.LabelPair{},
 							Summary: &dto.Summary{
-								SampleCount: proto.Uint64(2),
-								SampleSum:   proto.Float64(2.0),
 								Quantile: []*dto.Quantile{
 									{
 										Quantile: proto.Float64(0.01),
-										Value:    proto.Float64(2),
+										Value:    proto.Float64(1),
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+		}, 
+		{
+			name: "summary quantile works without receiving _sum or _count",
+			now:  time.Unix(20, 0),
+			age:  10 * time.Second,
+			input: []Input{
+				{
+					metric: testutil.MustMetric(
+						"prometheus",
+						map[string]string{"quantile": "0.5"},
+						map[string]interface{}{
+							"rpc_duration_seconds": 10.0,
+						},
+						time.Unix(0, 0),
+						telegraf.Summary,
+					),
+					addtime: time.Unix(0, 0), // Will expire
+				}, {
+					metric: testutil.MustMetric(
+						"prometheus",
+						map[string]string{"quantile": "0.01"},
+						map[string]interface{}{
+							"rpc_duration_seconds": 1.0,
+						},
+						time.Unix(0, 0),
+						telegraf.Summary,
+					),
+					addtime: time.Unix(15, 0), // Will keep
+				},
+			},
+			expected: []*dto.MetricFamily{
+				{
+					Name: proto.String("rpc_duration_seconds"),
+					Help: proto.String(helpString),
+					Type: dto.MetricType_SUMMARY.Enum(),
+					Metric: []*dto.Metric{
+						{
+							Label: []*dto.LabelPair{},
+							Summary: &dto.Summary{
+								Quantile: []*dto.Quantile{
+									{
+										Quantile: proto.Float64(0.01),
+										Value:    proto.Float64(1),
 									},
 								},
 							},
